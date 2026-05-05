@@ -22,6 +22,7 @@
     "multicriteria",
     "NOSONAR",
     "sarif",
-    "SARIF"
+    "SARIF",
+    "qualitygate"
   ]
 }

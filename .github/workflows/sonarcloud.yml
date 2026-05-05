@@ -149,57 +149,12 @@ jobs:
           # Rotate it immediately if it's ever exposed.
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-        # Optional: Pass additional scanner arguments.
-        # These override/extend what's in sonar-project.properties.
-        # with:
-        #   args: >
-        #     -Dsonar.projectVersion=${{ github.sha }}
-        #     -Dsonar.verbose=true
-
-      # -----------------------------------------------------------------------
-      # Step 8: Quality Gate Check (Optional but Recommended)
-      # -----------------------------------------------------------------------
-      # The sonarcloud-github-action above will report the Quality Gate status
-      # as a GitHub commit status. To FAIL the pipeline on Quality Gate failure,
-      # you need to poll the SonarCloud API.
-      #
-      # Note: As of 2024, sonarcloud-github-action does NOT automatically fail
-      # the workflow on Quality Gate failure. You need the explicit check below
-      # OR use sonar.qualitygate.wait=true in sonar-project.properties.
-      #
-      # Alternative: Add -Dsonar.qualitygate.wait=true to the args above.
-      # This makes the scanner wait and exit with non-zero code if gate fails.
-      - name: Check Quality Gate Status
-        run: |
-          # Poll until SonarCloud finishes analysis (max 5 minutes)
-          MAX_ATTEMPTS=30
-          ATTEMPT=0
-          GATE_STATUS="NONE"
-
-          until [ "$GATE_STATUS" != "NONE" ] && [ "$GATE_STATUS" != "IN_PROGRESS" ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            if [ "$ATTEMPT" -gt "$MAX_ATTEMPTS" ]; then
-              echo "::error::Timed out waiting for SonarCloud Quality Gate result."
-              exit 1
-            fi
-            echo "Waiting for analysis... attempt $ATTEMPT/$MAX_ATTEMPTS"
-            sleep 10
-
-            GATE_STATUS=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-              "https://sonarcloud.io/api/qualitygates/project_status?projectKey=jacquescyber_sonarcloud-devsecops-template" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['projectStatus']['status'])" 2>/dev/null || echo "NONE")
-          done
-
-          echo "Quality Gate Status: $GATE_STATUS"
-
-          if [ "$GATE_STATUS" != "OK" ]; then
-            echo "::error::Quality Gate FAILED. Review issues at https://sonarcloud.io"
-            exit 1
-          else
-            echo "Quality Gate PASSED."
-          fi
-        # Comment out or remove this step if you don't want to block on Quality Gate yet.
-        # Good practice: enable it from day one to enforce the security policy.
+        # sonar.qualitygate.wait=true makes the scanner block until SonarCloud
+        # finishes analysis and returns the Quality Gate result. The action will
+        # exit non-zero if the gate fails — no separate polling step needed.
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
 
       # -----------------------------------------------------------------------
       # Step 9: Upload coverage as artifact (optional, for debugging)
