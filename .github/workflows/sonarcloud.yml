@@ -171,13 +171,24 @@ jobs:
       # This makes the scanner wait and exit with non-zero code if gate fails.
       - name: Check Quality Gate Status
         run: |
-          # Wait briefly for SonarCloud to complete analysis
-          sleep 10
+          # Poll until SonarCloud finishes analysis (max 5 minutes)
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          GATE_STATUS="NONE"
 
-          # Fetch the Quality Gate status via SonarCloud API
-          GATE_STATUS=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "https://sonarcloud.io/api/qualitygates/project_status?projectKey=jacquescyber_sonarcloud-devsecops-template" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])")
+          until [ "$GATE_STATUS" != "NONE" ] && [ "$GATE_STATUS" != "IN_PROGRESS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ "$ATTEMPT" -gt "$MAX_ATTEMPTS" ]; then
+              echo "::error::Timed out waiting for SonarCloud Quality Gate result."
+              exit 1
+            fi
+            echo "Waiting for analysis... attempt $ATTEMPT/$MAX_ATTEMPTS"
+            sleep 10
+
+            GATE_STATUS=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+              "https://sonarcloud.io/api/qualitygates/project_status?projectKey=jacquescyber_sonarcloud-devsecops-template" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['projectStatus']['status'])" 2>/dev/null || echo "NONE")
+          done
 
           echo "Quality Gate Status: $GATE_STATUS"
 
