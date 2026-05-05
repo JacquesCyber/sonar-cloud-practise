@@ -1,0 +1,27 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "sonarcloud",
+    "sonarqube",
+    "hotspot",
+    "hotspots",
+    "IAST",
+    "DAST",
+    "SAST",
+    "cicd",
+    "devsecops",
+    "yourgithubusername",
+    "jacquescyber",
+    "Dsonar",
+    "pytest",
+    "venv",
+    "pycache",
+    "conftest",
+    "scannerwork",
+    "multicriteria",
+    "NOSONAR",
+    "sarif",
+    "SARIF"
+  ]
+}

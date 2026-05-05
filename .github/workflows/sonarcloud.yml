@@ -1,0 +1,206 @@
+# =============================================================================
+# SonarCloud Main Branch Analysis Workflow
+# =============================================================================
+# Triggers on pushes to main/develop branches.
+# Performs a full SonarCloud analysis and evaluates the Quality Gate.
+#
+# Setup requirements:
+# 1. SONAR_TOKEN secret in GitHub repo:
+#    Settings > Secrets and variables > Actions > New repository secret
+#    Name: SONAR_TOKEN
+#    Value: Token from SonarCloud > My Account > Security > Generate Tokens
+#
+# 2. sonar-project.properties at the repo root with correct projectKey/organization
+#
+# 3. SonarCloud project configured to use GitHub Actions as the CI provider
+#    (done during project setup wizard in SonarCloud UI)
+# =============================================================================
+
+name: SonarCloud Analysis
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+      # Add other long-lived branches you want continuously analyzed:
+      # - release/**
+      # - hotfix/**
+  workflow_dispatch:
+    # Allows manual trigger from the GitHub Actions UI.
+    # Useful when you want to re-run analysis without pushing code.
+
+# Limit concurrent runs to prevent queue buildup and race conditions
+# on the SonarCloud side. cancel-in-progress cancels older runs when
+# a new push comes in on the same branch.
+concurrency:
+  group: sonar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: ubuntu-latest
+
+    # Optional: Set a timeout so runaway jobs don't consume minutes indefinitely.
+    timeout-minutes: 30
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout the code
+      # -----------------------------------------------------------------------
+      # fetch-depth: 0 is CRITICAL for SonarCloud.
+      # Without it, you get a shallow clone (--depth=1) which means SonarCloud
+      # cannot compute blame information, detect new vs. old code, or accurately
+      # measure the "new code" period for Quality Gate evaluation.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # Step 2: Set up Python (if analyzing Python code)
+      # -----------------------------------------------------------------------
+      # SonarCloud does not execute code, but coverage reports require running tests.
+      # Remove this and the test step if you're not analyzing Python.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # -----------------------------------------------------------------------
+      # Step 3: Install Python dependencies
+      # -----------------------------------------------------------------------
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install your project dependencies
+          pip install pytest pytest-cov coverage
+          # If you have a requirements file:
+          # pip install -r requirements.txt
+
+      # -----------------------------------------------------------------------
+      # Step 4: Run tests and generate coverage report
+      # -----------------------------------------------------------------------
+      # SonarCloud reads coverage from a report file — it does NOT run tests itself.
+      # The coverage XML must exist before the SonarCloud action runs.
+      #
+      # The --cov-report=xml flag writes coverage.xml which sonar.python.coverage.reportPaths
+      # in sonar-project.properties points to.
+      - name: Run Python tests with coverage
+        run: |
+          pytest src/ \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            -v \
+            --ignore=src/vulnerable \
+          || true
+          # '|| true' prevents the step from failing if there are no tests yet.
+          # Remove '|| true' in a real project — test failures should fail the build.
+
+      # -----------------------------------------------------------------------
+      # Step 5: Set up Node.js (if analyzing JavaScript/TypeScript)
+      # -----------------------------------------------------------------------
+      # Remove this and the npm steps if you're not analyzing JavaScript.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+        # Only run if package.json exists
+        # You can use: if: hashFiles('package.json') != ''
+
+      # -----------------------------------------------------------------------
+      # Step 6: Install JS dependencies and run JS tests with coverage
+      # -----------------------------------------------------------------------
+      - name: Install JS dependencies and run tests
+        run: |
+          # Only run if package.json exists
+          if [ -f package.json ]; then
+            npm ci
+            # Generate LCOV coverage report for SonarCloud
+            npm test -- --coverage --coverageReporters=lcov --watchAll=false || true
+          else
+            echo "No package.json found, skipping JS test step"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 7: Run SonarCloud Analysis
+      # -----------------------------------------------------------------------
+      # The sonarcloud-github-action handles:
+      # - Downloading and running the SonarScanner
+      # - Passing GitHub context (branch, PR number, commit SHA) to SonarCloud
+      # - Waiting for the Quality Gate result (if wait: true)
+      #
+      # Key environment variables automatically set by this action:
+      # - GITHUB_TOKEN: Used to decorate PRs (read access to repo, write to PR comments)
+      # - SONAR_TOKEN: Authenticates with SonarCloud API
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          # GITHUB_TOKEN is automatically provided by GitHub Actions.
+          # It allows SonarCloud to post PR comments (decoration).
+          # No setup needed — just pass it through.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # SONAR_TOKEN must be configured as a repository secret.
+          # Never hardcode this token. Never print it in logs.
+          # Rotate it immediately if it's ever exposed.
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+        # Optional: Pass additional scanner arguments.
+        # These override/extend what's in sonar-project.properties.
+        # with:
+        #   args: >
+        #     -Dsonar.projectVersion=${{ github.sha }}
+        #     -Dsonar.verbose=true
+
+      # -----------------------------------------------------------------------
+      # Step 8: Quality Gate Check (Optional but Recommended)
+      # -----------------------------------------------------------------------
+      # The sonarcloud-github-action above will report the Quality Gate status
+      # as a GitHub commit status. To FAIL the pipeline on Quality Gate failure,
+      # you need to poll the SonarCloud API.
+      #
+      # Note: As of 2024, sonarcloud-github-action does NOT automatically fail
+      # the workflow on Quality Gate failure. You need the explicit check below
+      # OR use sonar.qualitygate.wait=true in sonar-project.properties.
+      #
+      # Alternative: Add -Dsonar.qualitygate.wait=true to the args above.
+      # This makes the scanner wait and exit with non-zero code if gate fails.
+      - name: Check Quality Gate Status
+        run: |
+          # Wait briefly for SonarCloud to complete analysis
+          sleep 10
+
+          # Fetch the Quality Gate status via SonarCloud API
+          GATE_STATUS=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "https://sonarcloud.io/api/qualitygates/project_status?projectKey=jacquescyber_sonarcloud-devsecops-template" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])")
+
+          echo "Quality Gate Status: $GATE_STATUS"
+
+          if [ "$GATE_STATUS" != "OK" ]; then
+            echo "::error::Quality Gate FAILED. Review issues at https://sonarcloud.io"
+            exit 1
+          else
+            echo "Quality Gate PASSED."
+          fi
+        # Comment out or remove this step if you don't want to block on Quality Gate yet.
+        # Good practice: enable it from day one to enforce the security policy.
+
+      # -----------------------------------------------------------------------
+      # Step 9: Upload coverage as artifact (optional, for debugging)
+      # -----------------------------------------------------------------------
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-reports
+          path: |
+            coverage.xml
+            coverage/
+          retention-days: 7

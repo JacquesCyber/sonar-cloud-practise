@@ -1,0 +1,40 @@
+# SonarCloud scanner working directory
+.scannerwork/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+coverage.xml
+.coverage
+htmlcov/
+
+# Node / JavaScript
+node_modules/
+coverage/
+*.lcov
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets — never commit these
+.env
+.env.*
+*.pem
+*.key
+secrets.json

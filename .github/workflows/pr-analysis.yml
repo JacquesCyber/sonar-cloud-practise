@@ -1,0 +1,228 @@
+# =============================================================================
+# SonarCloud Pull Request Analysis and Decoration Workflow
+# =============================================================================
+# Triggers on pull requests targeting main/develop.
+# Analyzes ONLY the changed code (new code period = PR diff).
+# Decorates the PR with:
+#   - Inline comments on lines with issues
+#   - Summary check in the PR Checks tab
+#   - Quality Gate pass/fail status
+#
+# How PR Decoration Works:
+# 1. This workflow runs SonarCloud on the PR branch
+# 2. SonarCloud compares the PR branch against the target branch (main)
+# 3. Issues found ONLY in the new/changed code are highlighted
+# 4. SonarCloud posts a comment on the PR summary and inline on specific lines
+# 5. A GitHub Check (pass/fail) is created based on Quality Gate
+#
+# Prerequisites:
+# 1. SONAR_TOKEN secret configured (same as main workflow)
+# 2. Automatic Analysis DISABLED in SonarCloud:
+#    SonarCloud > Project > Administration > Analysis Method > set to "GitHub Actions"
+#    (If Automatic Analysis is on, you'll get duplicate analyses)
+# 3. PR decoration enabled:
+#    SonarCloud > Project > Administration > Pull Requests > GitHub
+# =============================================================================
+
+name: PR Analysis
+
+on:
+  pull_request:
+    types:
+      - opened        # New PR created
+      - synchronize   # New commit pushed to existing PR
+      - reopened      # Previously closed PR reopened
+    branches:
+      - main
+      - master
+      - develop
+      # Add other target branches you want PR analysis for
+
+  # pull_request_target runs in the context of the BASE branch (not the PR branch).
+  # Use this ONLY if you need secrets access for PRs from forks.
+  # WARNING: pull_request_target with secrets is a security risk if your workflow
+  # runs untrusted code from the fork. Only use it with caution and explicit
+  # code-checkout steps that pin to the PR's SHA.
+  # pull_request_target:
+  #   branches: [main]
+
+concurrency:
+  group: sonar-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sonarcloud-pr:
+    name: PR SonarCloud Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Security: Don't run on PRs from forks unless you've handled the
+    # pull_request_target security implications. Fork PRs cannot access secrets
+    # via the standard pull_request event (this is a GitHub security feature).
+    # For public repos, this means fork PRs won't get decoration.
+    # For private repos, all PRs come from within the org, so this isn't an issue.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout with full history
+      # -----------------------------------------------------------------------
+      # For PRs, fetch-depth: 0 allows SonarCloud to:
+      # - Detect which files changed in this PR
+      # - Compare against the target branch
+      # - Accurately calculate "new code" coverage
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # For pull_request events, this checks out the merge commit (PR branch merged into base).
+          # This is the correct behavior for PR analysis.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # -----------------------------------------------------------------------
+      # Step 2: Set up Python
+      # -----------------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # -----------------------------------------------------------------------
+      # Step 3: Install dependencies
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov coverage
+          # pip install -r requirements.txt
+
+      # -----------------------------------------------------------------------
+      # Step 4: Run tests with coverage
+      # -----------------------------------------------------------------------
+      # Coverage for PR analysis should cover the CHANGED files.
+      # SonarCloud will show coverage on the specific lines changed in this PR.
+      - name: Run tests with coverage
+        run: |
+          pytest src/ \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            -v \
+            --ignore=src/vulnerable \
+          || true
+
+      # -----------------------------------------------------------------------
+      # Step 5: Set up Node.js (if applicable)
+      # -----------------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # -----------------------------------------------------------------------
+      # Step 6: Run JS tests if applicable
+      # -----------------------------------------------------------------------
+      - name: Run JS tests
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+            npm test -- --coverage --coverageReporters=lcov --watchAll=false || true
+          else
+            echo "No package.json, skipping"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 7: SonarCloud PR Analysis
+      # -----------------------------------------------------------------------
+      # For pull_request events, sonarcloud-github-action automatically:
+      # - Sets sonar.pullrequest.key (PR number)
+      # - Sets sonar.pullrequest.branch (head branch name)
+      # - Sets sonar.pullrequest.base (target/base branch)
+      # - Sets sonar.scm.revision (commit SHA)
+      #
+      # This triggers PR-mode analysis in SonarCloud, which:
+      # - Only evaluates Quality Gate on NEW code in the PR
+      # - Posts inline comments on affected lines
+      # - Creates a GitHub Check with pass/fail
+      - name: SonarCloud PR Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        # For PR analysis, you may want additional args:
+        # with:
+        #   args: >
+        #     -Dsonar.qualitygate.wait=true
+        #     -Dsonar.qualitygate.timeout=300
+
+      # -----------------------------------------------------------------------
+      # Step 8: Comment on PR with analysis summary (optional enhancement)
+      # -----------------------------------------------------------------------
+      # SonarCloud posts its own comment, but you can add a custom comment
+      # with a direct link to the analysis for convenience.
+      - name: Post SonarCloud link to PR
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const projectKey = 'your-org-key_sonarcloud-devsecops-template';
+            const prNumber = context.payload.pull_request.number;
+            const sonarUrl = `https://sonarcloud.io/project/issues?id=${projectKey}&pullRequest=${prNumber}&resolved=false`;
+
+            // Check if we already posted a comment to avoid duplicates
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const existingComment = comments.data.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('SonarCloud Analysis')
+            );
+
+            const body = `## SonarCloud Analysis
+
+            View the full analysis results:
+            - [Issues for this PR](${sonarUrl})
+            - [Security Hotspots](https://sonarcloud.io/project/security_hotspots?id=${projectKey}&pullRequest=${prNumber})
+
+            > The Quality Gate result is shown in the Checks tab above.`;
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
+
+      # -----------------------------------------------------------------------
+      # Security Note: Fork PRs
+      # -----------------------------------------------------------------------
+      # If you want to analyze PRs from forks (common for open-source projects),
+      # you need a different approach because fork PRs cannot access secrets.
+      #
+      # Recommended pattern for fork PR analysis:
+      #
+      # 1. First workflow (pull_request trigger, no secrets needed):
+      #    - Build and test
+      #    - Save artifacts (coverage reports, build artifacts)
+      #    - Upload the PR number as an artifact
+      #
+      # 2. Second workflow (workflow_run trigger, has access to secrets):
+      #    - Download artifacts from the first workflow
+      #    - Run SonarCloud with the artifacts
+      #    - This workflow has secret access because it runs in the base repo context
+      #
+      # See: https://docs.sonarsource.com/sonarcloud/advanced-setup/ci-based-analysis/github-actions-for-sonarcloud/
